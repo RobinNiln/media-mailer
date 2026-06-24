@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Media Mailer – Prototyp</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: { DEFAULT: '#1d4ed8', dark: '#1e3a8a', light: '#dbeafe' },
+            ink: '#0f172a'
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+    .nav-link.active { background: #dbeafe; color: #1e3a8a; font-weight: 600; }
+    .badge { font-size: 11px; padding: 2px 8px; border-radius: 9999px; font-weight: 600; }
+    [draggable="true"] { cursor: grab; }
+    .drop-zone.drag-over { background: #dbeafe; outline: 2px dashed #1d4ed8; }
+    .canvas-block:hover { outline: 2px solid #93c5fd; }
+    /* Fallback om Tailwind-CDN inte laddar – grundläggande layout hålls intakt */
+    .nav-link { display:flex; align-items:center; gap:.75rem; padding:.5rem .75rem; border-radius:.5rem; color:#475569; text-decoration:none; }
+    .nav-link:hover { background:#f8fafc; }
+  </style>
+</head>
+<body class="bg-slate-100 text-ink">
+  <div class="flex min-h-screen">
+    <!-- Sidebar -->
+    <aside class="w-60 bg-white border-r border-slate-200 flex flex-col fixed h-full">
+      <div class="px-5 py-4 border-b border-slate-200">
+        <div class="font-bold text-lg flex items-center gap-2">
+          <span class="w-7 h-7 bg-brand rounded-lg flex items-center justify-center text-white text-sm">M</span>
+          Media Mailer
+        </div>
+        <div class="text-xs text-slate-400 mt-1">Prototyp · mockdata</div>
+      </div>
+      <nav id="nav" class="flex-1 p-3 space-y-1 text-sm overflow-y-auto"></nav>
+      <div class="p-3 border-t border-slate-200 text-xs text-slate-400">
+        Inga riktiga mejl skickas.<br>Allt är simulerat.
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <main class="flex-1 ml-60">
+      <div id="view" class="p-8 max-w-7xl mx-auto"></div>
+    </main>
+  </div>
+
+  <script src="assets/editor.js"></script>
+  <script src="assets/app.js"></script>
+</body>
+</html>
