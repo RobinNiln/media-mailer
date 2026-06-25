@@ -1,7 +1,12 @@
 // ============================================================
-// Editor – simulerad canvas-liknande drag-and-drop
-// Bygger ett blockträd i minnet och renderar HTML-preview.
-// Visar kärnprincipen: design = JSON-blockträd, HTML genereras vid preview.
+// Editor – canvas-liknande drag-and-drop med inline-redigering
+// + simulerad AI-assistent
+//
+// Kärnprincip: design = JSON-blockträd. HTML genereras vid preview.
+// Tre funktioner:
+//   1. Dra block från paletten OCH flytta befintliga block (omordna)
+//   2. Inline-redigering direkt på canvasen + egenskapspanel
+//   3. Simulerad AI för rubrik/text/design
 // ============================================================
 
 // Block-palett (vänsterpanel)
@@ -17,15 +22,16 @@ const BLOCK_PALETTE = [
   { type: 'footer', label: 'Footer', icon: '▁' },
 ];
 
-// Editor-tillstånd: blockträdet
+// Editor-tillstånd
 let editorTree = null;
+let selectedBlockId = null;   // vilket block som är markerat (för egenskapspanel)
 
 function defaultBlock(type) {
   const id = 'b_' + Math.random().toString(36).slice(2, 7);
   const defs = {
     heading: { id, type, text: 'Ny rubrik' },
     text: { id, type, text: 'Skriv din text här. Klicka för att redigera.' },
-    image: { id, type, alt: 'Bild', placeholder: true },
+    image: { id, type, alt: 'Bild', placeholder: true, width: 600 },
     button: { id, type, text: 'Klicka här', url: 'https://example.se' },
     'article-card': { id, type, title: 'Artikelrubrik', desc: 'Kort beskrivning av artikeln.', cta: 'Läs mer', label: 'Lokalt', url: 'https://example.se' },
     cta: { id, type, text: 'Bli prenumerant idag', url: 'https://example.se' },
@@ -36,8 +42,20 @@ function defaultBlock(type) {
   return defs[type] || { id, type };
 }
 
+// ---------- Hitta block + dess kolumn i trädet ----------
+function findBlock(blockId) {
+  for (const section of editorTree.sections) {
+    for (const row of section.rows) {
+      for (const col of row.columns) {
+        const idx = col.blocks.findIndex(b => b.id === blockId);
+        if (idx !== -1) return { block: col.blocks[idx], col, idx };
+      }
+    }
+  }
+  return null;
+}
+
 function editorView(c) {
-  // Initiera trädet från sampleLayout första gången
   if (!editorTree) {
     editorTree = JSON.parse(JSON.stringify(DATA.app.sampleLayout));
   }
@@ -47,7 +65,7 @@ function editorView(c) {
       <div>
         <button onclick="navigate('campaigns')" class="text-brand text-sm">← Tillbaka</button>
         <h1 class="text-2xl font-bold">Kreativ editor</h1>
-        <p class="text-slate-500 text-sm">Dra block från vänster till canvasen. Designen lagras som JSON, inte som HTML.</p>
+        <p class="text-slate-500 text-sm">Dra block från vänster, eller dra befintliga block för att byta plats. Klicka på ett block för att redigera.</p>
       </div>
       <div class="flex gap-2">
         <button onclick="togglePreview()" id="preview-btn" class="border border-slate-300 px-3 py-2 rounded-lg text-sm">Förhandsgranska HTML</button>
@@ -60,10 +78,10 @@ function editorView(c) {
       <!-- Block-palett -->
       <div class="col-span-2">
         <div class="bg-white rounded-xl border border-slate-200 p-3 sticky top-4">
-          <div class="text-xs text-slate-400 mb-2 font-semibold uppercase">Block</div>
+          <div class="text-xs text-slate-400 mb-2 font-semibold uppercase">Lägg till block</div>
           <div class="space-y-1">
             ${BLOCK_PALETTE.map(b => `
-              <div draggable="true" ondragstart="dragStart(event,'${b.type}')"
+              <div draggable="true" ondragstart="paletteDragStart(event,'${b.type}')"
                 class="flex items-center gap-2 p-2 rounded-lg border border-slate-200 hover:border-brand text-sm bg-slate-50">
                 <span class="w-5 text-center text-slate-400">${b.icon}</span>${b.label}
               </div>`).join('')}
@@ -78,21 +96,9 @@ function editorView(c) {
         </div>
       </div>
 
-      <!-- Inspektor / hjälp -->
+      <!-- Inspektor (egenskapspanel + AI) -->
       <div class="col-span-3">
-        <div class="bg-white rounded-xl border border-slate-200 p-4 sticky top-4">
-          <div class="text-xs text-slate-400 mb-2 font-semibold uppercase">E-postsäker design</div>
-          <ul class="text-xs text-slate-500 space-y-2 list-disc list-inside">
-            <li>Block placeras i sektioner → rader → kolumner</li>
-            <li>Fri placering tillåts <b>inom</b> säkra containrar</li>
-            <li>Element snappar till kolumngrid</li>
-            <li>HTML genereras som tabeller för Outlook-stöd</li>
-            <li>Systemet varnar för design som inte fungerar i e-postklienter</li>
-          </ul>
-          <div class="mt-4 bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-700">
-            <b>Hybridmodell:</b> Fri canvas-känsla + strukturerade sektioner = robust e-post.
-          </div>
-        </div>
+        <div id="inspector" class="sticky top-4 space-y-4"></div>
       </div>
     </div>
 
@@ -102,12 +108,56 @@ function editorView(c) {
   `;
 
   renderCanvas();
+  renderInspector();
 }
 
-// ---------- Drag & drop ----------
-let draggedType = null;
-function dragStart(e, type) { draggedType = type; }
+// ============================================================
+// DRAG & DROP
+// Två källor: paletten (nytt block) och befintligt block (flytta).
+// dragPayload håller reda på vad som dras.
+// ============================================================
+let dragPayload = null; // { kind:'new', type } | { kind:'move', blockId }
 
+function paletteDragStart(e, type) {
+  dragPayload = { kind: 'new', type };
+  e.dataTransfer.effectAllowed = 'copy';
+}
+function blockDragStart(e, blockId) {
+  dragPayload = { kind: 'move', blockId };
+  e.dataTransfer.effectAllowed = 'move';
+  e.stopPropagation();
+}
+
+// Släpp på en kolumn, ev. vid ett visst index (före ett block)
+function handleDrop(col, beforeIndex) {
+  if (!dragPayload) return;
+
+  if (dragPayload.kind === 'new') {
+    const nb = defaultBlock(dragPayload.type);
+    if (beforeIndex == null) col.blocks.push(nb);
+    else col.blocks.splice(beforeIndex, 0, nb);
+    selectedBlockId = nb.id;
+  } else if (dragPayload.kind === 'move') {
+    const found = findBlock(dragPayload.blockId);
+    if (found) {
+      // ta bort från ursprungsplatsen
+      found.col.blocks.splice(found.idx, 1);
+      // justera index om vi flyttar inom samma kolumn och nedåt
+      let target = beforeIndex;
+      if (found.col === col && beforeIndex != null && found.idx < beforeIndex) target = beforeIndex - 1;
+      if (target == null) col.blocks.push(found.block);
+      else col.blocks.splice(target, 0, found.block);
+      selectedBlockId = found.block.id;
+    }
+  }
+  dragPayload = null;
+  renderCanvas();
+  renderInspector();
+}
+
+// ============================================================
+// CANVAS-RENDERING
+// ============================================================
 function renderCanvas() {
   const canvas = $('#email-canvas');
   canvas.innerHTML = '';
@@ -117,14 +167,29 @@ function renderCanvas() {
       const r = el(`<div class="flex" style="gap:0"></div>`);
       row.columns.forEach(col => {
         const colDiv = el(`<div style="flex:${col.width}" class="drop-zone p-1" data-col="${col.id}"></div>`);
+
+        // tillåt släpp i slutet av kolumnen
         colDiv.addEventListener('dragover', (e) => { e.preventDefault(); colDiv.classList.add('drag-over'); });
         colDiv.addEventListener('dragleave', () => colDiv.classList.remove('drag-over'));
         colDiv.addEventListener('drop', (e) => {
           e.preventDefault(); colDiv.classList.remove('drag-over');
-          if (draggedType) { col.blocks.push(defaultBlock(draggedType)); draggedType = null; renderCanvas(); }
+          handleDrop(col, null); // släpp i slutet
         });
-        col.blocks.forEach(block => colDiv.appendChild(renderBlock(block, col)));
-        if (col.blocks.length === 0) colDiv.appendChild(el(`<div class="text-center text-xs text-slate-300 py-6 border border-dashed border-slate-200 rounded">Släpp block här</div>`));
+
+        if (col.blocks.length === 0) {
+          colDiv.appendChild(el(`<div class="text-center text-xs text-slate-300 py-6 border border-dashed border-slate-200 rounded">Släpp block här</div>`));
+        } else {
+          col.blocks.forEach((block, i) => {
+            // droppzon ovanför varje block (för att flytta in före det)
+            const gap = el(`<div class="h-2 -my-1 rounded transition-colors" data-gap></div>`);
+            gap.addEventListener('dragover', (e) => { e.preventDefault(); e.stopPropagation(); gap.style.background = '#1d4ed8'; });
+            gap.addEventListener('dragleave', () => { gap.style.background = 'transparent'; });
+            gap.addEventListener('drop', (e) => { e.preventDefault(); e.stopPropagation(); gap.style.background = 'transparent'; handleDrop(col, i); });
+            colDiv.appendChild(gap);
+
+            colDiv.appendChild(renderBlock(block, col));
+          });
+        }
         r.appendChild(colDiv);
       });
       sec.appendChild(r);
@@ -135,36 +200,214 @@ function renderCanvas() {
 
 function renderBlock(block, col) {
   let inner = '';
+  // Inline-redigerbara fält använder data-edit="fält" + contenteditable
   switch (block.type) {
-    case 'heading': inner = `<h2 contenteditable="true" class="text-xl font-bold p-2 outline-none">${block.text}</h2>`; break;
-    case 'text': inner = `<p contenteditable="true" class="p-2 text-slate-700 outline-none text-sm">${block.text}</p>`; break;
-    case 'image': inner = `<div class="bg-slate-100 text-slate-400 text-center py-10 text-sm m-2 rounded">${block.placeholder ? '▣ Bildplatshållare' : block.src}</div>`; break;
-    case 'button': inner = `<div class="p-2"><span class="inline-block bg-brand text-white px-4 py-2 rounded text-sm">${block.text}</span></div>`; break;
-    case 'article-card': inner = `<div class="m-2 border border-slate-200 rounded-lg overflow-hidden">
-      <div class="bg-slate-100 text-slate-400 text-center py-6 text-xs">▣ bild</div>
-      <div class="p-3">${block.label ? `<span class="badge bg-brand-light text-brand">${block.label}</span>` : ''}
-      <div class="font-semibold mt-1" contenteditable="true">${block.title}</div>
-      <div class="text-xs text-slate-500" contenteditable="true">${block.desc}</div>
-      <span class="text-brand text-xs font-medium">${block.cta} →</span></div></div>`; break;
-    case 'cta': inner = `<div class="p-4 text-center text-white"><div class="font-bold mb-2" contenteditable="true">${block.text}</div>
-      <span class="inline-block bg-white text-brand px-4 py-2 rounded text-sm font-medium">Klicka här</span></div>`; break;
-    case 'dynamic': inner = `<div class="m-2 border-2 border-dashed border-amber-400 bg-amber-50 rounded-lg p-3 text-xs">
-      <span class="badge bg-amber-100 text-amber-700">⚡ Dynamiskt block</span>
-      <div class="mt-1 text-amber-700">Visas för: <b>${block.segment}</b></div>
-      <div class="text-amber-600">Fallback: ${block.fallback}</div></div>`; break;
-    case 'divider': inner = `<hr class="my-2 border-slate-200">`; break;
-    case 'footer': inner = `<div class="p-3 text-center text-xs text-slate-400">${block.text}<br>
-      <a class="underline">Avregistrera</a></div>`; break;
-    default: inner = `<div class="p-2 text-xs text-slate-400">${block.type}</div>`;
+    case 'heading':
+      inner = `<h2 data-edit="text" contenteditable="true" class="text-xl font-bold p-2 outline-none focus:bg-blue-50">${block.text}</h2>`; break;
+    case 'text':
+      inner = `<p data-edit="text" contenteditable="true" class="p-2 text-slate-700 outline-none text-sm focus:bg-blue-50">${block.text}</p>`; break;
+    case 'image':
+      inner = `<div class="bg-slate-100 text-slate-400 text-center py-10 text-sm m-2 rounded">${block.placeholder ? '▣ Bildplatshållare' : (block.src || '▣ bild')}</div>`; break;
+    case 'button':
+      inner = `<div class="p-2"><span data-edit="text" contenteditable="true" class="inline-block bg-brand text-white px-4 py-2 rounded text-sm outline-none">${block.text}</span></div>`; break;
+    case 'article-card':
+      inner = `<div class="m-2 border border-slate-200 rounded-lg overflow-hidden">
+        <div class="bg-slate-100 text-slate-400 text-center py-6 text-xs">▣ bild</div>
+        <div class="p-3">${block.label ? `<span class="badge bg-brand-light text-brand" data-edit="label" contenteditable="true">${block.label}</span>` : ''}
+        <div class="font-semibold mt-1 outline-none focus:bg-blue-50" data-edit="title" contenteditable="true">${block.title}</div>
+        <div class="text-xs text-slate-500 outline-none focus:bg-blue-50" data-edit="desc" contenteditable="true">${block.desc}</div>
+        <span class="text-brand text-xs font-medium"><span data-edit="cta" contenteditable="true" class="outline-none">${block.cta}</span> →</span></div></div>`; break;
+    case 'cta':
+      inner = `<div class="p-4 text-center text-white"><div data-edit="text" contenteditable="true" class="font-bold mb-2 outline-none">${block.text}</div>
+        <span class="inline-block bg-white text-brand px-4 py-2 rounded text-sm font-medium">Klicka här</span></div>`; break;
+    case 'dynamic':
+      inner = `<div class="m-2 border-2 border-dashed border-amber-400 bg-amber-50 rounded-lg p-3 text-xs">
+        <span class="badge bg-amber-100 text-amber-700">⚡ Dynamiskt block</span>
+        <div class="mt-1 text-amber-700">Visas för: <b>${block.segment}</b></div>
+        <div class="text-amber-600">Fallback: ${block.fallback}</div></div>`; break;
+    case 'divider':
+      inner = `<hr class="my-2 border-slate-200">`; break;
+    case 'footer':
+      inner = `<div class="p-3 text-center text-xs text-slate-400"><span data-edit="text" contenteditable="true" class="outline-none">${block.text}</span><br>
+        <a class="underline">Avregistrera</a></div>`; break;
+    default:
+      inner = `<div class="p-2 text-xs text-slate-400">${block.type}</div>`;
   }
-  const wrap = el(`<div class="canvas-block relative group" data-block="${block.id}">${inner}</div>`);
-  const del = el(`<button class="absolute -top-2 -right-2 bg-red-500 text-white w-5 h-5 rounded-full text-xs hidden group-hover:block">×</button>`);
-  del.onclick = () => { col.blocks = col.blocks.filter(b => b.id !== block.id); renderCanvas(); };
-  wrap.appendChild(del);
+
+  const isSelected = block.id === selectedBlockId;
+  const wrap = el(`<div draggable="true" class="canvas-block relative group ${isSelected ? 'ring-2 ring-brand' : ''}" data-block="${block.id}">${inner}</div>`);
+
+  // gör hela blocket dragbart för omordning
+  wrap.addEventListener('dragstart', (e) => blockDragStart(e, block.id));
+
+  // klick markerar blocket (för egenskapspanelen) – men inte när man klickar i ett editerbart fält
+  wrap.addEventListener('click', (e) => {
+    if (e.target.getAttribute('contenteditable') === 'true') return;
+    selectedBlockId = block.id;
+    renderCanvas();
+    renderInspector();
+  });
+
+  // spara inline-redigeringar tillbaka till trädet
+  wrap.querySelectorAll('[data-edit]').forEach(node => {
+    node.addEventListener('blur', () => {
+      const field = node.getAttribute('data-edit');
+      block[field] = node.innerText.trim();
+    });
+    // klick i fält ska inte trigga blockflytt eller markering
+    node.addEventListener('mousedown', (e) => e.stopPropagation());
+  });
+
+  // dra-handtag + radera (visas vid hover)
+  const tools = el(`<div class="absolute -top-3 right-1 hidden group-hover:flex gap-1"></div>`);
+  const handle = el(`<span class="bg-slate-700 text-white w-6 h-6 rounded-full text-xs flex items-center justify-center cursor-grab" title="Dra för att flytta">⠿</span>`);
+  const del = el(`<button class="bg-red-500 text-white w-6 h-6 rounded-full text-xs" title="Ta bort">×</button>`);
+  del.onclick = (e) => {
+    e.stopPropagation();
+    col.blocks = col.blocks.filter(b => b.id !== block.id);
+    if (selectedBlockId === block.id) selectedBlockId = null;
+    renderCanvas(); renderInspector();
+  };
+  tools.appendChild(handle);
+  tools.appendChild(del);
+  wrap.appendChild(tools);
+
   return wrap;
 }
 
-// ---------- Preview (HTML-generering) ----------
+// ============================================================
+// INSPEKTOR – egenskapspanel + AI-assistent
+// ============================================================
+function renderInspector() {
+  const ins = $('#inspector');
+  const found = selectedBlockId ? findBlock(selectedBlockId) : null;
+
+  let propsHtml = '';
+  if (found) {
+    propsHtml = blockProperties(found.block);
+  } else {
+    propsHtml = `<div class="bg-white rounded-xl border border-slate-200 p-4 text-sm text-slate-400">
+      Klicka på ett block i canvasen för att redigera dess egenskaper här.</div>`;
+  }
+
+  ins.innerHTML = propsHtml + aiPanel(found ? found.block : null) + helpPanel();
+  wireInspector();
+}
+
+function inputRow(label, field, value, placeholder = '') {
+  return `<label class="block mb-3">
+    <span class="text-xs text-slate-400">${label}</span>
+    <input data-prop="${field}" value="${(value ?? '').toString().replace(/"/g, '&quot;')}" placeholder="${placeholder}"
+      class="w-full mt-1 border border-slate-200 rounded-lg px-2 py-1.5 text-sm outline-none focus:border-brand">
+  </label>`;
+}
+
+function blockProperties(block) {
+  const fields = {
+    heading: () => inputRow('Rubriktext', 'text', block.text),
+    text: () => inputRow('Text', 'text', block.text),
+    image: () => inputRow('Bild-URL', 'src', block.src, 'https://...') + inputRow('Alt-text', 'alt', block.alt) + inputRow('Bredd (px)', 'width', block.width),
+    button: () => inputRow('Knapptext', 'text', block.text) + inputRow('Länk-URL', 'url', block.url),
+    'article-card': () => inputRow('Rubrik', 'title', block.title) + inputRow('Beskrivning', 'desc', block.desc) + inputRow('Etikett', 'label', block.label) + inputRow('Knapptext', 'cta', block.cta) + inputRow('Länk-URL', 'url', block.url),
+    cta: () => inputRow('Text', 'text', block.text) + inputRow('Länk-URL', 'url', block.url),
+    dynamic: () => segmentSelect(block) + inputRow('Fallback-innehåll', 'fallback', block.fallback),
+    footer: () => inputRow('Footer-text', 'text', block.text),
+    divider: () => `<div class="text-xs text-slate-400">Avdelaren har inga egenskaper.</div>`,
+  };
+  const body = fields[block.type] ? fields[block.type]() : '<div class="text-xs text-slate-400">Inga egenskaper.</div>';
+  return `<div class="bg-white rounded-xl border border-slate-200 p-4">
+    <div class="text-xs text-slate-400 mb-3 font-semibold uppercase">Egenskaper · ${block.type}</div>
+    ${body}
+  </div>`;
+}
+
+function segmentSelect(block) {
+  const segs = (DATA.app.segments || []).map(s => s.name);
+  const opts = ['Icke-betalande', 'Betalande', ...segs]
+    .map(s => `<option ${s === block.segment ? 'selected' : ''}>${s}</option>`).join('');
+  return `<label class="block mb-3"><span class="text-xs text-slate-400">Visa för segment</span>
+    <select data-prop="segment" class="w-full mt-1 border border-slate-200 rounded-lg px-2 py-1.5 text-sm">${opts}</select></label>`;
+}
+
+function wireInspector() {
+  document.querySelectorAll('[data-prop]').forEach(node => {
+    const ev = node.tagName === 'SELECT' ? 'change' : 'input';
+    node.addEventListener(ev, () => {
+      const found = findBlock(selectedBlockId);
+      if (!found) return;
+      found.block[node.getAttribute('data-prop')] = node.value;
+      renderCanvas(); // uppdatera canvasen live (utan att rendera om inspektorn = behåll fokus)
+    });
+  });
+}
+
+// ============================================================
+// SIMULERAD AI
+// Returnerar förskrivna förslag beroende på blocktyp.
+// Byts senare mot riktigt API-anrop bakom en backend.
+// ============================================================
+const AI_SUGGESTIONS = {
+  heading: ['Det här får du inte missa den här veckan', 'Veckans viktigaste – samlat på ett ställe', 'Fem nyheter som påverkar din vardag', 'Lokalt, snabbt och relevant – din vecka i korthet'],
+  text: ['Vi har samlat veckans mest lästa artiklar så att du snabbt hänger med i vad som händer där du bor.', 'Här är ett urval av det som engagerat våra läsare mest den senaste veckan.', 'Missa inget viktigt – det här är de nyheter som format veckan i din kommun.'],
+  'article-card': ['Allt du behöver veta inför helgen', 'Så påverkas du av det senaste beslutet', 'Vi förklarar: det här betyder förändringen för dig'],
+  cta: ['Bli prenumerant – läs allt utan begränsning', 'Stötta lokal journalistik, prova 1 månad gratis', 'Lås upp hela artikeln – starta din prenumeration idag'],
+  button: ['Läs hela artikeln', 'Ta del av erbjudandet', 'Fortsätt läsa'],
+};
+const AI_DESIGNS = [
+  { name: 'Nyhetsfokus', desc: 'Hero + två artikelkort + CTA. Bra för redaktionella veckobrev.' },
+  { name: 'Kampanj', desc: 'Stor hero, en tydlig CTA, minimal text. Bra för erbjudanden.' },
+  { name: 'Digest', desc: 'Lista av artikelkort i en kolumn. Bra för många länkar.' },
+];
+
+function aiPanel(block) {
+  const canSuggestText = block && AI_SUGGESTIONS[block.type];
+  return `<div class="bg-white rounded-xl border border-slate-200 p-4">
+    <div class="text-xs text-slate-400 mb-3 font-semibold uppercase flex items-center gap-2">
+      <span class="badge bg-violet-100 text-violet-700">✨ AI</span> Assistent <span class="text-slate-300 normal-case font-normal">(simulerad)</span></div>
+    ${canSuggestText
+      ? `<button onclick="aiSuggestText()" class="w-full mb-2 bg-violet-600 text-white px-3 py-2 rounded-lg text-sm">Föreslå ${block.type === 'text' ? 'text' : 'rubrik/text'}</button>`
+      : `<div class="text-xs text-slate-400 mb-2">Markera ett text-, rubrik-, knapp-, CTA- eller kortblock för textförslag.</div>`}
+    <button onclick="aiSuggestDesign()" class="w-full bg-white border border-violet-300 text-violet-700 px-3 py-2 rounded-lg text-sm">Föreslå layout</button>
+    <div id="ai-output" class="mt-3 space-y-2"></div>
+  </div>`;
+}
+
+function aiSuggestText() {
+  const found = findBlock(selectedBlockId);
+  if (!found) return;
+  const pool = AI_SUGGESTIONS[found.block.type] || [];
+  const field = found.block.type === 'article-card' ? 'title' : 'text';
+  const out = $('#ai-output');
+  out.innerHTML = `<div class="text-xs text-slate-400">Klicka för att använda ett förslag:</div>` +
+    pool.map(s => `<button class="ai-pick block w-full text-left text-sm border border-slate-200 rounded-lg p-2 hover:border-violet-400 hover:bg-violet-50"
+      data-field="${field}" data-text="${s.replace(/"/g, '&quot;')}">${s}</button>`).join('');
+  out.querySelectorAll('.ai-pick').forEach(btn => {
+    btn.onclick = () => {
+      const f = findBlock(selectedBlockId);
+      if (!f) return;
+      f.block[btn.getAttribute('data-field')] = btn.getAttribute('data-text');
+      renderCanvas(); renderInspector();
+    };
+  });
+}
+
+function aiSuggestDesign() {
+  const out = $('#ai-output');
+  out.innerHTML = `<div class="text-xs text-slate-400">Föreslagna layouter (simulerade):</div>` +
+    AI_DESIGNS.map(d => `<div class="text-sm border border-slate-200 rounded-lg p-2">
+      <div class="font-medium">${d.name}</div>
+      <div class="text-xs text-slate-500">${d.desc}</div></div>`).join('') +
+    `<div class="text-xs text-slate-400 mt-1">I riktig app genererar AI:n en faktisk blockstruktur du kan applicera.</div>`;
+}
+
+function helpPanel() {
+  return `<div class="bg-blue-50 border border-blue-200 rounded-xl p-4 text-xs text-blue-700">
+    <b>E-postsäker design:</b> block snappar till sektioner/rader/kolumner. HTML genereras som tabeller för Outlook-stöd. Fri placering tillåts inom säkra containrar.</div>`;
+}
+
+// ============================================================
+// PREVIEW (HTML-generering)
+// ============================================================
 function togglePreview() {
   const panel = $('#preview-panel');
   panel.classList.toggle('hidden');
@@ -191,7 +434,6 @@ function toggleJson() {
 }
 
 function generateEmailHtml() {
-  // Förenklad tabellbaserad render – demonstrerar principen
   let rows = '';
   editorTree.sections.forEach(s => {
     let cols = '';
@@ -232,14 +474,12 @@ function openConfirm(campId) {
       <div class="bg-white rounded-2xl max-w-2xl w-full p-6 max-h-[90vh] overflow-y-auto">
         <h2 class="text-xl font-bold mb-1">Bekräfta utskick</h2>
         <p class="text-slate-500 text-sm mb-4">Kontrollera allt innan kampanjen skickas skarpt.</p>
-
         <div class="grid grid-cols-2 gap-3 text-sm mb-4">
           ${field('Kampanj', x.name)}${field('Ämnesrad', x.subject)}
           ${field('Preheader', x.preheader)}${field('Avsändare', x.from)}
           ${field('Reply-to', x.replyTo)}${field('Segment', x.segment)}
           ${field('Exkludering', x.exclude || '–')}${field('Skicktid', x.sentAt || 'Direkt')}
         </div>
-
         <div class="bg-slate-50 rounded-xl p-4 mb-4">
           <div class="grid grid-cols-3 gap-3 text-center">
             ${stat('Mottagare', fmt(x.recipients || 2210))}
@@ -247,7 +487,6 @@ function openConfirm(campId) {
             ${stat('Skickas till', fmt((x.recipients || 2210) - (x.filtered || 47)))}
           </div>
         </div>
-
         <div class="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-4 text-sm">
           <div class="font-semibold text-amber-700 mb-2">Bortfiltrering – orsaker</div>
           <div class="space-y-1 text-amber-700 text-xs">
@@ -257,7 +496,6 @@ function openConfirm(campId) {
             <div class="flex justify-between"><span>Ogiltig e-postadress</span><span>2</span></div>
           </div>
         </div>
-
         <div class="space-y-2 text-sm mb-5">
           ${checkRow('Testutskick genomfört', true)}
           ${checkRow('Godkänd av granskare', x.status === 'approved')}
@@ -265,7 +503,6 @@ function openConfirm(campId) {
           ${checkRow('Samtyckeskontroll genomförd', true)}
           ${checkRow('Segment-snapshot skapad', true)}
         </div>
-
         <div class="flex gap-3 justify-end">
           <button onclick="this.closest('.fixed').remove()" class="border border-slate-300 px-4 py-2 rounded-lg text-sm">Avbryt</button>
           <button onclick="confirmSend(this)" class="bg-brand text-white px-5 py-2 rounded-lg text-sm font-medium">Bekräfta & skicka skarpt</button>
