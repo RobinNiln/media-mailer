@@ -73,26 +73,63 @@ const VIEWS = {};
 // ---------- Dashboard ----------
 VIEWS.dashboard = (c) => {
   const a = DATA.app.analytics;
+  const o = DATA.app.overview;
+  const t = o.trends;
   const recent = DATA.campaigns.filter(x => x.status === 'sent');
-  c.innerHTML = pageHeader('Dashboard', 'Översikt över utskick och prenumeranter') + `
+
+  // Trendgraf: öppningsgrad senaste utskicken
+  const openSeries = DATA.app.trendSeries.map(s => ({ label: s.label, value: s.openRate }));
+
+  c.innerHTML = pageHeader('Dashboard', 'Överblick över verksamheten och pågående utskick') + `
+    <!-- Räknare: vad har vi / vad är på gång -->
+    <div class="grid grid-cols-6 gap-3 mb-6">
+      ${counter('Nyhetsbrev', o.newsletters, 'newsletters', 'brand')}
+      ${counter('Automationer', o.activeAutomations, 'automations', 'violet')}
+      ${counter('Schemalagda', o.scheduledCampaigns, 'campaigns', 'blue')}
+      ${counter('I granskning', o.inReview, 'campaigns', 'amber')}
+      ${counter('Utkast', o.drafts, 'campaigns', 'slate')}
+      ${counter('Kontakter', fmt(o.totalContacts), 'contacts', 'emerald')}
+    </div>
+
+    <!-- Prestanda-KPI med trendpil -->
     <div class="grid grid-cols-4 gap-4 mb-6">
       ${kpi('Skickade mejl (totalt)', fmt(a.totalSent), 'brand')}
-      ${kpi('Genomsnittlig öppning', pct(a.avgOpenRate), 'emerald')}
-      ${kpi('Genomsnittlig CTR', pct(a.avgCtr), 'blue')}
-      ${kpi('Avregistreringar', pct(a.unsubRate), 'orange')}
+      ${kpi('Genomsnittlig öppning', pct(a.avgOpenRate), 'emerald', trendPill(t.openRate))}
+      ${kpi('Genomsnittlig CTR', pct(a.avgCtr), 'blue', trendPill(t.ctr))}
+      ${kpi('Avregistreringar', pct(a.unsubRate), 'orange', trendPill(t.unsubRate, { goodWhenUp: false }))}
     </div>
+
+    <div class="grid grid-cols-3 gap-4 mb-4">
+      <!-- Trendgraf -->
+      <div class="col-span-2">${card(`
+        <div class="flex justify-between items-center mb-3">
+          <h2 class="font-semibold">Öppningsgrad – senaste 8 utskicken</h2>
+          <span class="text-xs text-slate-400">trend</span></div>
+        ${lineChart(openSeries, { color: '#10b981', fmt: pct })}
+      `)}</div>
+      <!-- Kräver uppmärksamhet -->
+      <div>${card(`
+        <h2 class="font-semibold mb-3">Kräver din uppmärksamhet</h2>
+        <div class="space-y-2">
+          ${DATA.app.attention.map(item => `
+            <a href="#campaigns/${item.campaign}" class="block p-2 rounded-lg border ${item.level === 'warn' ? 'border-amber-200 bg-amber-50' : 'border-blue-200 bg-blue-50'} text-xs hover:opacity-80">
+              <span class="${item.level === 'warn' ? 'text-amber-700' : 'text-blue-700'}">${item.level === 'warn' ? '⚠' : 'ℹ'} ${item.text}</span>
+            </a>`).join('')}
+        </div>`)}</div>
+    </div>
+
     <div class="grid grid-cols-3 gap-4">
       <div class="col-span-2">${card(`
         <h2 class="font-semibold mb-4">Senaste kampanjer</h2>
         <div class="space-y-3">
           ${recent.map(x => `
-            <div class="flex items-center justify-between py-2 border-b border-slate-100 last:border-0">
+            <a href="#analytics/${x.id}" class="flex items-center justify-between py-2 border-b border-slate-100 last:border-0 hover:bg-slate-50 rounded px-1">
               <div><div class="font-medium">${x.name}</div>
                 <div class="text-xs text-slate-400">${x.newsletter} · ${x.sentAt}</div></div>
               <div class="text-right text-sm">
                 <span class="text-emerald-600 font-semibold">${pct(x.opened / x.recipients)}</span>
                 <span class="text-slate-400"> öppning</span></div>
-            </div>`).join('')}
+            </a>`).join('')}
         </div>`)}</div>
       <div>${card(`
         <h2 class="font-semibold mb-4">Mest klickade länkar</h2>
@@ -103,8 +140,15 @@ VIEWS.dashboard = (c) => {
       `)}</div>
     </div>`;
 };
-function kpi(label, value, color) {
-  return card(`<div class="text-xs text-slate-400 mb-1">${label}</div>
+
+function counter(label, value, route, color) {
+  return `<a href="#${route}" class="bg-white rounded-xl border border-slate-200 p-3 block hover:border-${color === 'brand' ? 'brand' : color + '-400'} transition-colors">
+    <div class="text-2xl font-bold text-${color === 'brand' ? 'brand' : color + '-600'}">${value}</div>
+    <div class="text-xs text-slate-400 mt-0.5">${label}</div></a>`;
+}
+
+function kpi(label, value, color, extra = '') {
+  return card(`<div class="text-xs text-slate-400 mb-1 flex justify-between">${label} ${extra}</div>
     <div class="text-2xl font-bold text-${color === 'brand' ? 'brand' : color + '-600'}">${value}</div>`);
 }
 
@@ -242,27 +286,115 @@ VIEWS.blocks = (c) => {
 };
 
 // ---------- Analytics ----------
-VIEWS.analytics = (c) => {
+VIEWS.analytics = (c, id) => {
+  if (id) return campaignReport(c, id);
+
   const sent = DATA.campaigns.filter(x => x.status === 'sent');
-  c.innerHTML = pageHeader('Analys', 'Resultat per kampanj') + `
-    <div class="bg-white rounded-xl border border-slate-200 overflow-hidden mb-6">
+  const b = DATA.app.benchmarks;
+  // Aggregerad tratt över alla skickade kampanjer
+  const agg = sent.reduce((acc, x) => {
+    acc.sent += x.recipients; acc.delivered += x.recipients - x.bounced;
+    acc.opened += x.opened; acc.clicked += x.clicked; return acc;
+  }, { sent: 0, delivered: 0, opened: 0, clicked: 0 });
+
+  const ctrSeries = DATA.app.trendSeries.map(s => ({ label: s.label, value: s.ctr }));
+
+  c.innerHTML = pageHeader('Analys', 'Hur utskicken levererar och presterar') + `
+    <!-- Tratt + trend sida vid sida -->
+    <div class="grid grid-cols-2 gap-4 mb-6">
+      ${card(`<h2 class="font-semibold mb-4">Leveranstratt – alla utskick</h2>
+        ${funnelChart([
+          { label: 'Skickat', value: agg.sent, color: '#1d4ed8' },
+          { label: 'Levererat', value: agg.delivered, color: '#0ea5e9' },
+          { label: 'Öppnat', value: agg.opened, color: '#10b981' },
+          { label: 'Klickat', value: agg.clicked, color: '#8b5cf6' },
+        ])}`)}
+      ${card(`<h2 class="font-semibold mb-4">Klickfrekvens (CTR) över tid</h2>
+        ${lineChart(ctrSeries, { color: '#8b5cf6', fmt: pct })}
+        <div class="grid grid-cols-3 gap-2 mt-4 text-center">
+          ${benchStat('Öppning', agg.opened / agg.sent, b.openRate)}
+          ${benchStat('CTR', agg.clicked / agg.sent, b.ctr)}
+          ${benchStat('Leverans', agg.delivered / agg.sent, 1 - b.bounceRate)}
+        </div>`)}
+    </div>
+
+    <!-- Tabell per kampanj, klickbar för djuprapport -->
+    <div class="bg-white rounded-xl border border-slate-200 overflow-hidden mb-3">
+      <div class="px-5 py-3 border-b border-slate-100 font-semibold">Resultat per kampanj</div>
       <table class="w-full text-sm">
         <thead class="bg-slate-50 text-slate-500 text-left">
           <tr><th class="px-5 py-3 font-medium">Kampanj</th><th class="px-5 py-3 font-medium">Skickat</th>
           <th class="px-5 py-3 font-medium">Öppnat</th><th class="px-5 py-3 font-medium">CTR</th>
-          <th class="px-5 py-3 font-medium">Avreg.</th></tr></thead>
+          <th class="px-5 py-3 font-medium">Avreg.</th><th class="px-5 py-3 font-medium">Bounce</th><th></th></tr></thead>
         <tbody>${sent.map(x => `
-          <tr class="border-t border-slate-100">
+          <tr onclick="navigate('analytics/${x.id}')" class="border-t border-slate-100 hover:bg-slate-50 cursor-pointer">
             <td class="px-5 py-3 font-medium">${x.name}</td>
             <td class="px-5 py-3">${fmt(x.recipients)}</td>
             <td class="px-5 py-3">${pct(x.opened / x.recipients)}</td>
             <td class="px-5 py-3">${pct(x.clicked / x.recipients)}</td>
             <td class="px-5 py-3">${x.unsubscribed}</td>
+            <td class="px-5 py-3">${x.bounced}</td>
+            <td class="px-5 py-3 text-brand text-xs">Rapport →</td>
           </tr>`).join('')}</tbody>
       </table>
     </div>
     <p class="text-xs text-slate-400">Siffror är mockdata. I riktig app kommer dessa från provider-webhooks och tracking-events.</p>`;
 };
+
+function benchStat(label, value, bench) {
+  const good = value >= bench;
+  return `<div>
+    <div class="text-lg font-bold ${good ? 'text-emerald-600' : 'text-amber-600'}">${pct(value)}</div>
+    <div class="text-[10px] text-slate-400">${label}</div>
+    <div class="text-[10px] ${good ? 'text-emerald-500' : 'text-amber-500'}">${good ? '↑' : '↓'} bransch ${pct(bench)}</div>
+  </div>`;
+}
+
+// ---------- Djup kampanjrapport ----------
+function campaignReport(c, id) {
+  const x = DATA.campaigns.find(k => k.id === id);
+  const data = DATA.app.campaignAnalytics[id];
+  if (!x) { c.innerHTML = '<p>Kampanj saknas.</p>'; return; }
+
+  const back = `<button onclick="navigate('analytics')" class="text-brand text-sm mb-4">← Tillbaka till analys</button>`;
+
+  if (!data) {
+    c.innerHTML = back + pageHeader(x.name, 'Detaljrapport') +
+      card(`<p class="text-sm text-slate-500">Ingen detaljerad analysdata för denna kampanj i prototypen.</p>`);
+    return;
+  }
+
+  const f = data.funnel;
+  c.innerHTML = back + pageHeader(x.name, `${x.newsletter} · skickad ${x.sentAt}`) + `
+    <!-- Nyckeltal -->
+    <div class="grid grid-cols-4 gap-4 mb-4">
+      ${kpi('Levererat', pct(f.delivered / f.sent), 'blue')}
+      ${kpi('Öppnat', pct(f.opened / f.delivered), 'emerald')}
+      ${kpi('Klickat (CTR)', pct(f.clicked / f.delivered), 'violet')}
+      ${kpi('CTOR (klick/öppning)', pct(f.clicked / f.opened), 'brand')}
+    </div>
+
+    <div class="grid grid-cols-2 gap-4 mb-4">
+      ${card(`<h2 class="font-semibold mb-4">Leveranstratt</h2>
+        ${funnelChart([
+          { label: 'Skickat', value: f.sent, color: '#1d4ed8' },
+          { label: 'Levererat', value: f.delivered, color: '#0ea5e9' },
+          { label: 'Öppnat', value: f.opened, color: '#10b981' },
+          { label: 'Klickat', value: f.clicked, color: '#8b5cf6' },
+        ])}`)}
+      ${card(`<h2 class="font-semibold mb-4">När mejlet öppnades</h2>
+        ${barChart(data.openTimeline, { color: '#10b981' })}
+        <p class="text-xs text-slate-400 mt-3">De flesta öppningar sker första timmarna – relevant för bästa skicktid.</p>`)}
+    </div>
+
+    <div class="grid grid-cols-2 gap-4">
+      ${card(`<h2 class="font-semibold mb-4">Vilket innehåll fungerade bäst</h2>
+        ${hBars(data.blocks.map(bl => ({ label: bl.name, value: bl.clicks, sub: pct(bl.ctr) + ' CTR' })), { color: '#1d4ed8' })}
+        <p class="text-xs text-slate-400 mt-3">Klick per block visar vilket innehåll som engagerar – styr framtida design.</p>`)}
+      ${card(`<h2 class="font-semibold mb-4">Mest klickade länkar</h2>
+        ${hBars(data.links.map(l => ({ label: l.url, value: l.clicks })), { color: '#8b5cf6' })}`)}
+    </div>`;
+}
 
 // ---------- Imports ----------
 VIEWS.imports = (c) => {
