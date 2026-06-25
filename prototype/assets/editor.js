@@ -207,7 +207,15 @@ function renderBlock(block, col) {
     case 'text':
       inner = `<p data-edit="text" contenteditable="true" class="p-2 text-slate-700 outline-none text-sm focus:bg-blue-50">${block.text}</p>`; break;
     case 'image':
-      inner = `<div class="bg-slate-100 text-slate-400 text-center py-10 text-sm m-2 rounded">${block.placeholder ? '▣ Bildplatshållare' : (block.src || '▣ bild')}</div>`; break;
+      if (block.src) {
+        inner = `<div class="m-2"><img src="${block.src}" alt="${block.alt || ''}" style="max-width:100%;display:block;border-radius:4px"></div>`;
+      } else {
+        inner = `<div class="bg-slate-100 text-slate-400 text-center py-8 text-sm m-2 rounded">
+          <div class="mb-2">▣ Ingen bild vald</div>
+          <button onclick="event.stopPropagation();triggerImageUpload('${block.id}')" class="bg-brand text-white px-3 py-1.5 rounded text-xs">Ladda upp bild</button>
+        </div>`;
+      }
+      break;
     case 'button':
       inner = `<div class="p-2"><span data-edit="text" contenteditable="true" class="inline-block bg-brand text-white px-4 py-2 rounded text-sm outline-none">${block.text}</span></div>`; break;
     case 'article-card':
@@ -302,11 +310,49 @@ function inputRow(label, field, value, placeholder = '') {
   </label>`;
 }
 
+// Uppladdningsrad i egenskapspanelen
+function uploadRow(blockId) {
+  return `<div class="mb-3">
+    <span class="text-xs text-slate-400">Bild</span>
+    <button onclick="triggerImageUpload('${blockId}')" class="w-full mt-1 bg-brand text-white rounded-lg px-2 py-1.5 text-sm">Ladda upp bild från datorn</button>
+    <div class="text-[10px] text-slate-400 mt-1">Max ~2 MB. Bilden lagras i sessionen (prototyp).</div>
+  </div>`;
+}
+
+// Öppnar filväljaren och läser in vald bild som data-URL
+function triggerImageUpload(blockId) {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/png,image/jpeg,image/gif,image/webp';
+  input.onchange = () => {
+    const file = input.files[0];
+    if (!file) return;
+    if (file.size > 2 * 1024 * 1024) {
+      alert('Bilden är större än 2 MB. Välj en mindre bild för prototypen.');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const found = findBlock(blockId);
+      if (!found) return;
+      found.block.src = reader.result;       // data-URL
+      found.block.placeholder = false;
+      if (!found.block.alt) found.block.alt = file.name.replace(/\.[^.]+$/, '');
+      selectedBlockId = blockId;
+      renderCanvas();
+      renderInspector();
+    };
+    reader.readAsDataURL(file);
+  };
+  input.click();
+}
+
+
 function blockProperties(block) {
   const fields = {
     heading: () => inputRow('Rubriktext', 'text', block.text),
     text: () => inputRow('Text', 'text', block.text),
-    image: () => inputRow('Bild-URL', 'src', block.src, 'https://...') + inputRow('Alt-text', 'alt', block.alt) + inputRow('Bredd (px)', 'width', block.width),
+    image: () => uploadRow(block.id) + inputRow('Bild-URL (eller klistra in extern)', 'src', block.src, 'https://...') + inputRow('Alt-text', 'alt', block.alt) + inputRow('Bredd (px)', 'width', block.width),
     button: () => inputRow('Knapptext', 'text', block.text) + inputRow('Länk-URL', 'url', block.url),
     'article-card': () => inputRow('Rubrik', 'title', block.title) + inputRow('Beskrivning', 'desc', block.desc) + inputRow('Etikett', 'label', block.label) + inputRow('Knapptext', 'cta', block.cta) + inputRow('Länk-URL', 'url', block.url),
     cta: () => inputRow('Text', 'text', block.text) + inputRow('Länk-URL', 'url', block.url),
@@ -428,7 +474,7 @@ function toggleJson() {
     panel.innerHTML = `
       <div class="bg-white rounded-xl border border-slate-200 p-5">
         <h2 class="font-semibold mb-3">Blockträd (JSON) – det här lagras i databasen</h2>
-        <pre class="bg-slate-900 text-blue-300 text-xs p-4 rounded-lg overflow-x-auto max-h-80">${escapeHtml(JSON.stringify(editorTree, null, 2))}</pre>
+        <pre class="bg-slate-900 text-blue-300 text-xs p-4 rounded-lg overflow-x-auto max-h-80">${escapeHtml(JSON.stringify(editorTree, (k, v) => (typeof v === 'string' && v.startsWith('data:image') ? v.slice(0, 40) + '…[uppladdad bild, förkortad]' : v), 2))}</pre>
       </div>`;
   }
 }
